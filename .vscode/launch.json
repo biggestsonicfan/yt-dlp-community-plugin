@@ -1,0 +1,24 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.0.1",
+    "configurations": [
+        {
+            "name": "Python Debugger: Module",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "yt_dlp",
+            "args": [
+                "https://www.youtube.com/post/Ugkx3chE1Bm5UFsuMTrcpkT2L9BuMJUBQIuX",
+                "--cookies-from-browser",
+                "firefox",
+                "--skip-download",
+                "--add-metadata",
+                "--write-info-json",
+                "--write-comments",
+                "--ignore-no-formats"
+            ]
+        }
+    ]
+}

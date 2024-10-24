@@ -9,7 +9,7 @@ Requires yt-dlp `2023.01.02` or above.
 
 You can install this package with pip:
 ```
-python3 -m pip install -U https://github.com/yt-dlp/yt-dlp-sample-plugins/archive/master.zip
+python3 -m pip install -U https://github.com/biggestsonicfan/yt-dlp-community-plugin/archive/refs/heads/master.zip
 ```
 
 See [installing yt-dlp plugins](https://github.com/yt-dlp/yt-dlp#installing-plugins) for the other methods this plugin package can be installed.
