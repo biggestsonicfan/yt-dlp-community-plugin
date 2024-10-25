@@ -10,7 +10,7 @@
             "request": "launch",
             "module": "yt_dlp",
             "args": [
-                "https://www.youtube.com/post/Ugkx3chE1Bm5UFsuMTrcpkT2L9BuMJUBQIuX",
+                "https://www.youtube.com/post/UgkxNu6y5W5T2cUW_LcSVojcViVXfQdxZ3Y8",
                 "--cookies-from-browser",
                 "firefox",
                 "--add-metadata",
@@ -21,7 +21,7 @@
                 "-P",
                 "downloaded_data",
                 "-o",
-                "%(id)s/%(id)s.%(ext)s"
+                "%(playlist_id,id)s/%(id)s.%(ext)s"
             ]
         }
     ]

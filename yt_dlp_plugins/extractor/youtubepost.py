@@ -1,22 +1,23 @@
 import base64
+import itertools
 import re
 import sys
-import itertools
 
 from yt_dlp.extractor.youtube import YoutubeBaseInfoExtractor, BadgeType
 from yt_dlp.networking import HEADRequest
 from yt_dlp.utils import (
     ExtractorError,
-    traverse_obj,
-    try_get,
-    str_or_none,
-    urlhandle_detect_ext,
     get_first,
     int_or_none,
-    urljoin,
+    join_nonempty,
     parse_count,
-    url_or_none
+    str_or_none,
+    try_get,
+    urljoin,
+    url_or_none,
+    urlhandle_detect_ext,
 )
+from yt_dlp.utils.traversal import traverse_obj
 
 YoutubeBaseInfoExtractor._RESERVED_NAMES = (
     r'channel|c|user|playlist|watch|w|v|embed|e|live|watch_popup|clip|'
@@ -37,26 +38,8 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
         },
     }]
 
-    def _real_extract(self, url):
-        post_id = self._match_id(url)
-        webpage = self._download_webpage(url, post_id)
-        initial_data = self.extract_yt_initial_data(post_id, webpage)
-        ytcfg = self.extract_ytcfg(post_id, webpage)
-        backstage_post_renderer = traverse_obj(initial_data, (
-            'contents', 'twoColumnBrowseResultsRenderer', 'tabs', 0, 'tabRenderer', 'content',
-            'sectionListRenderer', 'contents', 0, 'itemSectionRenderer', 'contents', 0,
-            'backstagePostThreadRenderer', 'post', 'backstagePostRenderer', {dict})) or {}
-        author_text = traverse_obj(backstage_post_renderer, (
-            'authorText', 'runs', ..., {dict}), get_all=False) or {}
-        channel = author_text.get('text')
-        # TODO: Can't handle multiple images in one
-        backstage_attachment = traverse_obj(backstage_post_renderer, ('backstageAttachment', {dict}))
-        image_attchment = traverse_obj(backstage_attachment, ('backstageImageRenderer', {dict}))
-        image_attchments = traverse_obj(backstage_attachment, (
-            'postMultiImageRenderer', 'images', ..., 'backstageImageRenderer', {dict}))
-        formats = self._extract_thumbnails(image_attchment, ('image'))
-        if not formats:
-            formats = self._extract_thumbnails(image_attchments, (..., 'image'))
+    def _extract_formats(self, renderer, post_id):
+        formats = self._extract_thumbnails(renderer, 'image')
         width = max(traverse_obj(formats, (..., 'width')) or [0]) or None
         height = max(traverse_obj(formats, (..., 'height')) or [0]) or None
         transcode_url = traverse_obj(formats, (..., 'url'), get_all=False) or ''
@@ -75,24 +58,64 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
             if not fmt.get('format_id') and fmt.get('height'):
                 fmt['format_id'] = str(fmt['height'])
             fmt['ext'] = ext
+        return formats
+
+    def _real_extract(self, url):
+        post_id = self._match_id(url)
+        webpage = self._download_webpage(url, post_id)
+        initial_data = self.extract_yt_initial_data(post_id, webpage)
+        ytcfg = self.extract_ytcfg(post_id, webpage)
+        backstage_post_renderer = traverse_obj(initial_data, (
+            'contents', 'twoColumnBrowseResultsRenderer', 'tabs', 0, 'tabRenderer', 'content',
+            'sectionListRenderer', 'contents', 0, 'itemSectionRenderer', 'contents', 0,
+            'backstagePostThreadRenderer', 'post', 'backstagePostRenderer', {dict})) or {}
+        author_text = traverse_obj(backstage_post_renderer, (
+            'authorText', 'runs', ..., {dict}), get_all=False) or {}
+        channel = author_text.get('text')
+        content_text = self._get_text(backstage_post_renderer, 'contentText') or ''
 
         contents = traverse_obj(initial_data, (
             'contents', 'twoColumnBrowseResultsRenderer', 'tabs', ...,
             (('tabRenderer', 'expandableTabRenderer'), {dict}), ...,
             'content', 'sectionListRenderer', 'contents', ...))
 
-        return {
+        common_info = {
             **traverse_obj(author_text, ('navigationEndpoint', 'browseEndpoint', {
                 'channel_id': ('browseId', {str}),
                 'uploader_id': ('canonicalBaseUrl', {self.handle_from_url}),
             })),
+            'id': post_id,
+            'title': content_text.replace('\n', ' '),
+            'description': content_text or None,
             'timestamp': self._parse_time_text(self._get_text(backstage_post_renderer, 'publishedTimeText')),
             'channel': channel,
             'uploader': channel,
-            'id': post_id,
-            'title': self._get_text(backstage_post_renderer, 'contentText'),
-            'formats': formats,
+            'members_only': bool(backstage_post_renderer.get('sponsorsOnlyBadge')),
+        }
+
+        entries = []
+        for idx, image_renderer in enumerate(traverse_obj(backstage_post_renderer, (
+                'backstageAttachment', (None, ('postMultiImageRenderer', 'images', ...)),
+                'backstageImageRenderer', {dict})), start=1):
+            entries.append({
+                **common_info,
+                'id': join_nonempty(post_id, idx),
+                'title': join_nonempty(common_info['title'], idx, delim=' '),
+                'formats': self._extract_formats(image_renderer, post_id),
+            })
+
+        comments_info = {
             '__post_extractor': self.extract_comments(ytcfg, post_id, contents, webpage)
+        }
+
+        if len(entries) > 1:
+            entries[0].update(comments_info)
+            return self.playlist_result(entries, **common_info)
+
+        return {
+            **(entries[0] if entries else {}),
+            **common_info,
+            **comments_info,
         }
 
     @classmethod
