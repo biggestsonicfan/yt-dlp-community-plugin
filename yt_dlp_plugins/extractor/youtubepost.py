@@ -1,21 +1,34 @@
 import base64
+import os
 import re
+import sys
 import json
 import itertools
 
-from yt_dlp.extractor.youtube import YoutubeBaseInfoExtractor
+from yt_dlp.extractor.youtube import YoutubeTabBaseInfoExtractor, BadgeType
 from yt_dlp.networking import HEADRequest
-from yt_dlp.utils import  ExtractorError, traverse_obj, try_get, str_or_none, urlhandle_detect_ext, get_first, int_or_none
+from yt_dlp.utils import (
+    ExtractorError,
+    traverse_obj,
+    try_get,
+    str_or_none,
+    urlhandle_detect_ext,
+    get_first,
+    int_or_none,
+    urljoin,
+    parse_count,
+    url_or_none
+    )
 
 
-YoutubeBaseInfoExtractor._RESERVED_NAMES = (
+YoutubeTabBaseInfoExtractor._RESERVED_NAMES = (
     r'channel|c|user|playlist|watch|w|v|embed|e|live|watch_popup|clip|'
     r'shorts|movies|results|search|shared|hashtag|trending|explore|feed|feeds|'
     r'browse|oembed|get_video_info|iframe_api|s/player|source|'
     r'storefront|oops|index|account|t/terms|about|upload|signin|logout|post')
 
 
-class YoutubePostIE(YoutubeBaseInfoExtractor):
+class YoutubePostIE(YoutubeTabBaseInfoExtractor):
     IE_DESC = 'YouTube Community Posts'
     IE_NAME = 'youtube:post'
     _VALID_URL = r'https?://(?:www\.)?youtube\.com/post/(?P<id>[^/#?]+)'
@@ -24,6 +37,8 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
         post_id = self._match_id(url)
         webpage = self._download_webpage(url, post_id)
         initial_data = self.extract_yt_initial_data(post_id, webpage)
+        self._dump_json(initial_data, "initial_data")
+        self.report_warning(f"{os.getcwd()}")
         ytcfg = self.extract_ytcfg(post_id, webpage)
         backstage_post_renderer = traverse_obj(initial_data, (
             'contents', 'twoColumnBrowseResultsRenderer', 'tabs', 0, 'tabRenderer', 'content',
@@ -71,15 +86,99 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
             'title': self._get_text(backstage_post_renderer, 'contentText'),
             'formats': formats,
             'tracking_parm': tracking_param,
+            '__post_extractor': self.extract_comments(ytcfg, post_id, initial_data)
+        }
+    
+    def _extract_comment(self, entities, parent=None):
+        comment_entity_payload = get_first(entities, ('payload', 'commentEntityPayload', {dict}))
+        if not (comment_id := traverse_obj(comment_entity_payload, ('properties', 'commentId', {str}))):
+            return
+
+        toolbar_entity_payload = get_first(entities, ('payload', 'engagementToolbarStateEntityPayload', {dict}))
+        time_text = traverse_obj(comment_entity_payload, ('properties', 'publishedTime', {str})) or ''
+
+        return {
+            'id': comment_id,
+            'parent': parent or 'root',
+            **traverse_obj(comment_entity_payload, {
+                'text': ('properties', 'content', 'content', {str}),
+                'like_count': ('toolbar', 'likeCountA11y', {parse_count}),
+                'author_id': ('author', 'channelId', {self.ucid_or_none}),
+                'author': ('author', 'displayName', {str}),
+                'author_thumbnail': ('author', 'avatarThumbnailUrl', {url_or_none}),
+                'author_is_uploader': ('author', 'isCreator', {bool}),
+                'author_is_verified': ('author', 'isVerified', {bool}),
+                'author_is_member': ('author', 'sponsorBadgeA11y', {str}),
+                'author_member_badge': ('author', 'sponsorBadgeUrl', {url_or_none}),
+                'author_url': ('author', 'channelCommand', 'innertubeCommand', (
+                    ('browseEndpoint', 'canonicalBaseUrl'), ('commandMetadata', 'webCommandMetadata', 'url'),
+                ), {lambda x: urljoin('https://www.youtube.com', x)}),
+            }, get_all=False),
+            'is_favorited': (None if toolbar_entity_payload is None else
+                             toolbar_entity_payload.get('heartState') == 'TOOLBAR_HEART_STATE_HEARTED'),
+            '_time_text': time_text,  # FIXME: non-standard, but we need a way of showing that it is an estimate.
+            'timestamp': self._parse_time_text(time_text),
         }
 
+    def _extract_comment_old(self, comment_renderer, parent=None):
+        comment_id = comment_renderer.get('commentId')
+        if not comment_id:
+            return
+
+        info = {
+            'id': comment_id,
+            'text': self._get_text(comment_renderer, 'contentText'),
+            'like_count': self._get_count(comment_renderer, 'voteCount'),
+            'author_id': traverse_obj(comment_renderer, ('authorEndpoint', 'browseEndpoint', 'browseId', {self.ucid_or_none})),
+            'author': self._get_text(comment_renderer, 'authorText'),
+            'author_thumbnail': traverse_obj(comment_renderer, ('authorThumbnail', 'thumbnails', -1, 'url', {url_or_none})),
+            'parent': parent or 'root',
+        }
+
+        # Timestamp is an estimate calculated from the current time and time_text
+        time_text = self._get_text(comment_renderer, 'publishedTimeText') or ''
+        timestamp = self._parse_time_text(time_text)
+
+        info.update({
+            # FIXME: non-standard, but we need a way of showing that it is an estimate.
+            '_time_text': time_text,
+            'timestamp': timestamp,
+        })
+
+        info['author_url'] = urljoin(
+            'https://www.youtube.com', traverse_obj(comment_renderer, ('authorEndpoint', (
+                ('browseEndpoint', 'canonicalBaseUrl'), ('commandMetadata', 'webCommandMetadata', 'url'))),
+                expected_type=str, get_all=False))
+
+        author_is_uploader = traverse_obj(comment_renderer, 'authorIsChannelOwner')
+        if author_is_uploader is not None:
+            info['author_is_uploader'] = author_is_uploader
+
+        comment_abr = traverse_obj(
+            comment_renderer, ('actionButtons', 'commentActionButtonsRenderer'), expected_type=dict)
+        if comment_abr is not None:
+            info['is_favorited'] = 'creatorHeart' in comment_abr
+
+        badges = self._extract_badges([traverse_obj(comment_renderer, 'authorCommentBadge')])
+        if self._has_badge(badges, BadgeType.VERIFIED):
+            info['author_is_verified'] = True
+
+        is_pinned = traverse_obj(comment_renderer, 'pinnedCommentBadge')
+        if is_pinned:
+            info['is_pinned'] = True
+
+        return info
+    
     def _comment_entries(self, root_continuation_data, ytcfg, video_id, parent=None, tracker=None):
         get_single_config_arg = lambda c: self._configuration_arg(c, [''])[0]
 
-        def extract_header(contents):
+        #Backup
+        '''
+                def extract_header(contents):
             _continuation = None
             for content in contents:
-                comments_header_renderer = traverse_obj(content, 'commentsHeaderRenderer')
+                comments_header_renderer = traverse_obj(content, 'onResponseReceivedEndpoints', 0,
+                    'reloadContinuationItemsCommand', 'continuationItems', ..., 'commentsHeaderRenderer')
                 expected_comment_count = self._get_count(
                     comments_header_renderer, 'countText', 'commentsCount')
 
@@ -87,9 +186,38 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
                     tracker['est_total'] = expected_comment_count
                     self.to_screen(f'Downloading ~{expected_comment_count} comments')
                 comment_sort_index = int(get_single_config_arg('comment_sort') != 'top')  # 1 = new, 0 = top
-
+                self._dump_json(comments_header_renderer, "comments_header_renderer")
                 sort_menu_item = try_get(
                     comments_header_renderer,
+                    lambda x: x['sortMenu']['sortFilterSubMenuRenderer']['subMenuItems'][comment_sort_index], dict) or {}
+                sort_continuation_ep = sort_menu_item.get('serviceEndpoint') or {}
+
+                _continuation = self._extract_continuation_ep_data(sort_continuation_ep) or self._extract_continuation(sort_menu_item)
+                if not _continuation:
+                    continue
+
+                sort_text = str_or_none(sort_menu_item.get('title'))
+                if not sort_text:
+                    sort_text = 'top comments' if comment_sort_index == 0 else 'newest first'
+                self.to_screen(f'Sorting comments by {sort_text.lower()}')
+                break
+            return _continuation
+        '''
+        def extract_header(contents):
+            _continuation = None
+            for content in contents:
+                comments_header_renderer = traverse_obj(content, 'onResponseReceivedEndpoints', 0,
+                    'reloadContinuationItemsCommand', 'continuationItems', ..., 'commentsHeaderRenderer')
+                
+                expected_comment_count = int(comments_header_renderer[0]['countText']['runs'][0]['text'])
+
+                if expected_comment_count is not None:
+                    tracker['est_total'] = expected_comment_count
+                    self.to_screen(f'Downloading ~{expected_comment_count} comments')
+                comment_sort_index = int(get_single_config_arg('comment_sort') != 'top')  # 1 = new, 0 = top
+                self._dump_json(comments_header_renderer, "comments_header_renderer")
+                sort_menu_item = try_get(
+                    comments_header_renderer[0],
                     lambda x: x['sortMenu']['sortFilterSubMenuRenderer']['subMenuItems'][comment_sort_index], dict) or {}
                 sort_continuation_ep = sort_menu_item.get('serviceEndpoint') or {}
 
@@ -192,7 +320,6 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
 
         max_comments, max_parents, max_replies, max_replies_per_thread, *_ = (
             int_or_none(p, default=sys.maxsize) for p in self._configuration_arg('max_comments') + [''] * 4)
-
         continuation = self._extract_continuation(root_continuation_data)
 
         response = None
@@ -207,7 +334,7 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
             is_forced_continuation = True
 
         continuation_items_path = (
-            'onResponseReceivedEndpoints', ..., ('reloadContinuationItemsCommand', 'appendContinuationItemsAction'), 'continuationItems')
+            'onResponseReceivedEndpoints', ..., 'reloadContinuationItemsCommand', 'continuationItems')
         for page_num in itertools.count(0):
             if not continuation:
                 break
@@ -231,10 +358,8 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
                 check_get_keys = [[*continuation_items_path, ..., (
                     'commentsHeaderRenderer' if is_first_continuation else ('commentThreadRenderer', 'commentViewModel', 'commentRenderer'))]]
             try:
-                response = self._extract_response(
-                    item_id=None, query=continuation,
-                    ep='next', ytcfg=ytcfg, headers=headers, note=note_prefix,
-                    check_get_keys=check_get_keys)
+                response = self._call_api('browse', continuation, video_id, True, headers, 'Downloading comment section API JSON', 'Oopsies')               
+                self._dump_json(response, "new_response")
             except ExtractorError as e:
                 # Ignore incomplete data error for replies if retries didn't work.
                 # This is to allow any other parent comments and comment threads to be downloaded.
@@ -253,6 +378,7 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
                 raise
             is_forced_continuation = False
             continuation = None
+            self._dump_json(response, "continuation_response")
             mutations = traverse_obj(response, ('frameworkUpdates', 'entityBatchUpdate', 'mutations', ..., {dict}))
             for continuation_items in traverse_obj(response, continuation_items_path, expected_type=list, default=[]):
                 if is_first_continuation:
@@ -261,7 +387,6 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
                     if continuation:
                         break
                     continue
-
                 for entry in extract_thread(continuation_items, mutations):
                     if not entry:
                         return
@@ -283,27 +408,83 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
         token = f'\x12\r\x12\x0b{video_id}\x18\x062\'"\x11"\x0b{video_id}0\x00x\x020\x00B\x10comments-section'
         return base64.b64encode(token.encode()).decode()
 
-    def _get_comments(self, ytcfg, video_id, contents, webpage):
+    def _get_comments(self, ytcfg, video_id, contents):
         """Entry for comment extraction"""
-        def _real_comment_extract(contents):
-            renderer = next((
-                item for item in traverse_obj(contents, (..., 'itemSectionRenderer'), default={})
-                if item.get('sectionIdentifier') == 'comment-item-section'), None)
-            yield from self._comment_entries(renderer, ytcfg, video_id)
-
-        max_comments = int_or_none(self._configuration_arg('max_comments', [''])[0])
-        tabs = self._extract_tab_renderers(contents)
-        tab = next(
-            tab for tab in tabs
+        def _real_comment_extract(response):
+            yield from self._comment_entries(response, ytcfg, video_id)
+        tab = self._extract_tab_renderers(contents)
+        continuation_renderer = next(
+            (item for item in traverse_obj(tab, (..., 'content', 'sectionListRenderer', 'contents', ..., 'itemSectionRenderer'), default={})
+            if item.get('sectionIdentifier') == 'comment-item-section'),
+            None
         )
-        test_alt = next((
-            item for item in traverse_obj(tab, ('content', 'sectionListRenderer', 'contents', ..., 'itemSectionRenderer'), default={})
-            if item.get('sectionIdentifier') == 'comment-item-section'), None)
+        self._dump_json(contents, "contents")
         headers = self.generate_api_headers(ytcfg=ytcfg, default_client='web')
-        token = traverse_obj(test_alt, ('contents', 0, 'continuationItemRenderer', 'continuationEndpoint', 'continuationCommand'))
-
-        response = self._call_api('browse', {'context': ytcfg['INNERTUBE_CONTEXT'], 'continuation': token['token']}, video_id, True, headers, 'Getting Browse Response',
-                                  'Oopsies')
+        #token = traverse_obj(continuation_renderer, ('contents', 0, 'continuationItemRenderer', 'continuationEndpoint', 'continuationCommand'))
+        continuation_renderer['contents'][0]['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']
+        response = self._call_api('browse', {'context': ytcfg['INNERTUBE_CONTEXT'],
+         'continuation': continuation_renderer['contents'][0]['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']},
+          video_id, True, headers, 'Getting comment count for post', 'Oopsies')
+        self._dump_json(response, "response")
         max_comments = int(response['onResponseReceivedEndpoints'][0]['reloadContinuationItemsCommand']['continuationItems'][0]['commentsHeaderRenderer']['countText']['runs'][0]['text'])
-        self.report_warning(f'{max_comments}')
-        return itertools.islice(_real_comment_extract(tab['content']['sectionListRenderer']['contents']), 0, max_comments)
+        return itertools.islice(_real_comment_extract(response), 0, max_comments)
+    '''
+    @classmethod
+    def _extract_next_continuation_data(cls, renderer):
+        #next_continuation = try_get(
+        #    renderer, (lambda x: x['continuations'][0]['nextContinuationData'],
+        #               lambda x: x['continuation']['reloadContinuationData']), dict)
+        next_continuation = traverse_obj(renderer, ("onResponseReceivedEndpoints", 1, 'reloadContinuationItemsCommand', 'continuationItems',
+                ..., 'continuationItemRenderer'), default={})
+        for continuation in next_continuation:
+            if continuation.get('trigger') == 'CONTINUATION_TRIGGER_ON_ITEM_SHOWN':
+                next_continuation = continuation
+        if not next_continuation:
+            return
+        continuation = next_continuation['continuationEndpoint']['continuationCommand'].get('token')
+        if not continuation:
+            return
+        ctp = next_continuation['continuationEndpoint'].get('clickTrackingParams')
+        return cls._build_api_continuation_query(continuation, ctp)
+    '''
+    @classmethod
+    def _extract_next_continuation_data(cls, renderer):
+        next_continuation = traverse_obj(renderer, ("onResponseReceivedEndpoints", 0, 'reloadContinuationItemsCommand', 'continuationItems',
+                ..., 'commentsHeaderRenderer', 'sortMenu', 'sortFilterSubMenuRenderer', 'subMenuItems', ..., ), default={})
+        for continuation in next_continuation:
+            if continuation.get('title') == 'Newest first':
+                next_continuation = continuation
+        if not next_continuation:
+            return
+        continuation = next_continuation['serviceEndpoint']['continuationCommand'].get('token')
+        if not continuation:
+            return
+        ctp = next_continuation['serviceEndpoint'].get('clickTrackingParams')
+        return cls._build_api_continuation_query(continuation, ctp)
+
+    @classmethod
+    def _extract_continuation_ep_data(cls, continuation_ep: dict):
+        if isinstance(continuation_ep, dict):
+            continuation = try_get(
+                continuation_ep, lambda x: x['continuationCommand']['token'], str)
+            if not continuation:
+                return
+            ctp = continuation_ep.get('clickTrackingParams')
+            return cls._build_api_continuation_query(continuation, ctp)
+
+    @classmethod
+    def _extract_continuation(cls, renderer):
+        next_continuation = cls._extract_next_continuation_data(renderer)
+        if next_continuation:
+            return next_continuation
+
+        return traverse_obj(renderer, (
+            ('contents', 'items', 'rows'), ..., 'continuationItemRenderer',
+            ('continuationEndpoint', ('button', 'buttonRenderer', 'command')),
+        ), get_all=False, expected_type=cls._extract_continuation_ep_data)
+
+    #Sorry, for debugging atm, will be removed later
+    @staticmethod
+    def _dump_json(json_data, file_name):
+        with open(f"community-test/{file_name}.json", 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=4)

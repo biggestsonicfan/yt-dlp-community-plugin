@@ -13,11 +13,14 @@
                 "https://www.youtube.com/post/Ugkx3chE1Bm5UFsuMTrcpkT2L9BuMJUBQIuX",
                 "--cookies-from-browser",
                 "firefox",
-                "--skip-download",
                 "--add-metadata",
                 "--write-info-json",
                 "--write-comments",
-                "--ignore-no-formats"
+                "--ignore-no-formats",
+                "-P",
+                "downloaded_data",
+                "-o",
+                "%(id)s/%(id)s.%(ext)s"
             ]
         }
     ]
