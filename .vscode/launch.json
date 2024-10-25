@@ -16,6 +16,7 @@
                 "--add-metadata",
                 "--write-info-json",
                 "--write-comments",
+                "--ignore-errors",
                 "--ignore-no-formats",
                 "-P",
                 "downloaded_data",
