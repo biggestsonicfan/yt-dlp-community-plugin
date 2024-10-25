@@ -357,9 +357,13 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
             # Do a deep check for incomplete data as sometimes YouTube may return no comments for a continuation
             # Ignore check if YouTube says the comment count is 0.
             check_get_keys = None
+            #if not is_forced_continuation and not (tracker['est_total'] == 0 and tracker['running_total'] == 0):
+            #    check_get_keys = [[*continuation_items_path, ..., (
+            #        'commentsHeaderRenderer' if is_first_continuation else ('commentThreadRenderer', 'commentViewModel', 'commentRenderer'))]]
             if not is_forced_continuation and not (tracker['est_total'] == 0 and tracker['running_total'] == 0):
                 check_get_keys = [[*continuation_items_path, ..., (
-                    'commentsHeaderRenderer' if is_first_continuation else ('commentThreadRenderer', 'commentViewModel', 'commentRenderer'))]]
+                    'commentsHeaderRenderer' if is_first_continuation else ('commentThreadRenderer', 'replies', 'commentRepliesRenderer',
+                    'contents', ..., 'continuationItemRenderer'))]]
             try:
                 #response = self._call_api('browse', continuation, video_id, True, headers, 'Downloading comment section API JSON', 'Oopsies')               
                 self._dump_json(continuation, "last_continuation")
@@ -429,9 +433,6 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
         headers = self.generate_api_headers(ytcfg=ytcfg, default_client='web')
         #token = traverse_obj(continuation_renderer, ('contents', 0, 'continuationItemRenderer', 'continuationEndpoint', 'continuationCommand'))
         continuation_renderer['contents'][0]['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']
-        #response = self._call_api('browse', {'context': ytcfg['INNERTUBE_CONTEXT'],
-        # 'continuation': continuation_renderer['contents'][0]['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']},
-        #  video_id, True, headers, 'Getting comment count for post', 'Oopsies')
         response = self._extract_response(
             item_id=None, query={'context': ytcfg['INNERTUBE_CONTEXT'],
             'continuation': continuation_renderer['contents'][0]['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']},
@@ -553,6 +554,7 @@ class YoutubePostIE(YoutubeBaseInfoExtractor):
             # Youtube sometimes sends incomplete data
             # See: https://github.com/ytdl-org/youtube-dl/issues/28194
             if not traverse_obj(response, *variadic(check_get_keys)):
+                self._dump_json(response, "response_fails_check_get_keys")
                 icd_rm.error = ExtractorError('Incomplete data received', expected=True)
                 should_retry = next(icd_retries, None)
                 if not should_retry:
