@@ -3,7 +3,7 @@ import itertools
 import re
 import sys
 
-from yt_dlp.extractor.youtube import YoutubeBaseInfoExtractor, BadgeType
+from yt_dlp.extractor.youtube._base import YoutubeBaseInfoExtractor, BadgeType
 from yt_dlp.networking import HEADRequest
 from yt_dlp.utils import (
     ExtractorError,
